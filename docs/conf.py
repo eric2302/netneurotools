@@ -11,11 +11,17 @@
 import os
 import sys
 
+import pyvista as pv
+
+# necessary when building the sphinx gallery
+pv.BUILDING_GALLERY = True
+pv.OFF_SCREEN = True
+
 # -- Project information -----------------------------------------------------
 
 # Add project name, copyright holder, and author(s)
 project = 'netneurotools'
-copyright = '2018-2024, netneurotools developers'
+copyright = '2018-2026, netneurotools developers'
 author = 'Network Neuroscience Lab'
 
 # Import project to get version info
@@ -40,7 +46,7 @@ extensions = [
     'sphinx.ext.napoleon',
     'sphinx.ext.viewcode',
     'sphinx_gallery.gen_gallery',
-    'sphinx_design'
+    # 'sphinx_design'
 ]
 
 # Generate the API documentation when building
@@ -112,9 +118,9 @@ intersphinx_mapping = {
     'python': ('https://docs.python.org/3', None),
     'matplotlib': ('https://matplotlib.org/stable', None),
     'numpy': ('https://numpy.org/doc/stable/', None),
-    'scipy': ('https://docs.scipy.org/doc/scipy', None),
+    # 'scipy': ('https://docs.scipy.org/doc/scipy', None),
     'sklearn': ('https://scikit-learn.org/stable', None),
-    'pandas': ('https://pandas.pydata.org/pandas-docs/stable', None),
+    'pandas': ('https://pandas.pydata.org/docs', None),
     'pyvista': ('https://docs.pyvista.org/', None),
 }
 
@@ -124,11 +130,13 @@ np.random.seed(1234)\
 """
 
 sphinx_gallery_conf = {
+    'examples_dirs': '../examples',
+    'gallery_dirs': 'auto_examples',
     'doc_module': 'netneurotools',
     'backreferences_dir': os.path.join('generated', 'modules'),
     'reference_url': {
         'netneurotools': None
     },
     'thumbnail_size': (250, 250),
-    'ignore_pattern': r'/wip.*\.py',
+    "image_scrapers": ('pyvista', 'matplotlib'),
 }

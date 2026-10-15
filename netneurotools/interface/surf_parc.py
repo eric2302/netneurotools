@@ -1,7 +1,9 @@
 """Transforms for datasets."""
 
+import os
 import numpy as np
 import nibabel as nib
+import scipy.stats as sstats
 
 from netneurotools.interface.cifti import extract_cifti_surface_labels
 from netneurotools.interface.freesurfer import extract_annot_labels
@@ -39,10 +41,13 @@ def load_surf_parc_file(parc_file, cifti_structure=None, parc_ignore=PARCIGNORE)
     """
     Load surface parcellation file with vertices and labels.
 
+    The parcellation can also be a pre-loaded image (`nib.GiftiImage` or
+    `nib.Cifti2Image`).
+
     Parameters
     ----------
-    parc_file : str or Path
-        Path to parcellation file.
+    parc_file : str or os.PathLike or nib.GiftiImage or nib.Cifti2Image
+        Path to a parcellation file or a pre-loaded image.
     cifti_structure : str, optional
         CIFTI structure for dlabel.nii files.
     parc_ignore : list, optional
@@ -57,36 +62,50 @@ def load_surf_parc_file(parc_file, cifti_structure=None, parc_ignore=PARCIGNORE)
     labels : tuple
         Labels.
     """
-    if str(parc_file).endswith("gii"):
+    # if path-like, then load the image first
+    if isinstance(parc_file, (str, os.PathLike)):
+        parc_file = str(parc_file)
+
+        # if `.annot` file, extract labels (and Return)
+        if parc_file.lower().endswith('.annot'):
+            return extract_annot_labels(parc_file, parc_ignore=parc_ignore)
+
+        # else load nibabel object (GiftiImage or Cifti2Image)
+        parc = nib.load(parc_file)
+
+    else:  # image was pre-loaded
+        parc = parc_file
+
+    # if a GiftiImage
+    if isinstance(parc, nib.gifti.GiftiImage):
         surf_data, keys, labels = extract_gifti_labels(
-            parc_file, parc_ignore=parc_ignore
-        )
-    elif str(parc_file).endswith("dlabel.nii"):
+            parc, parc_ignore=parc_ignore)
+
+    # if a Cifti2Image
+    elif isinstance(parc, nib.cifti2.Cifti2Image):
         if cifti_structure is None:
             raise ValueError("cifti_structure must be specified for dlabel.nii files")
         else:
-            cifti = nib.load(parc_file)
             surf_data, keys, labels = extract_cifti_surface_labels(
-                cifti.get_fdata(),
-                cifti.header.get_axis(0),
-                cifti.header.get_axis(1),
+                parc.get_fdata(),
+                parc.header.get_axis(0),
+                parc.header.get_axis(1),
                 cifti_structure,
                 parc_ignore=parc_ignore,
             )
-    elif str(parc_file).endswith("annot"):
-        surf_data, keys, labels = extract_annot_labels(
-            parc_file, parc_ignore=parc_ignore
-        )
+
     else:
         raise ValueError(
             "Unsupported parcellation file format, "
             "only gii, dlabel.nii, and annot are supported."
         )
+
     return surf_data, keys, labels
 
 
 def _vertices_to_parcels_single_hemi(
-    vert_data, parc_file, cifti_structure=None, background=None, parc_ignore=PARCIGNORE
+    vert_data, parc_file, cifti_structure=None, background=None, parc_ignore=PARCIGNORE,
+    agg_method='mean'
 ):
     vertices, keys, labels = load_surf_parc_file(
         parc_file, cifti_structure=cifti_structure, parc_ignore=parc_ignore
@@ -109,12 +128,20 @@ def _vertices_to_parcels_single_hemi(
         if not found.any():
             reduced.append(np.empty_like(vert_data[0]) * np.nan)
         else:
-            reduced.append(np.nanmean(vert_data[found], axis=0))
+            if agg_method == 'mean':
+                reduced.append(np.nanmean(vert_data[found], axis=0))
+            elif agg_method == 'median':
+                reduced.append(np.nanmedian(vert_data[found], axis=0))
+            elif agg_method == 'mode':
+                reduced.append(sstats.mode(vert_data[found], axis=0, nan_policy='omit'
+                                           )[0]
+                               )
     return np.array(reduced), keys, labels
 
 
 def vertices_to_parcels(
-    vert_data, parc_file, hemi="both", background=None, parc_ignore=PARCIGNORE
+    vert_data, parc_file, hemi="both", background=None, parc_ignore=PARCIGNORE,
+    agg_method='mean'
 ):
     """
     Convert vertex-level data to parcel-level data.
@@ -128,9 +155,12 @@ def vertices_to_parcels(
     hemi : str, optional
         Hemisphere to process. Can be 'both', 'L', or 'R'.
     background : int, optional
-        Background value in vert_data to ignore.
+        Background value in vert_data to ignore. NaN values are always ignored.
     parc_ignore : list, optional
         List of labels to ignore.
+    agg_method : str
+        Method used to aggregate vertex-level values within each parcel. Options are:
+        'mean', 'median' and 'mode'. Default is 'mean'.
 
     Returns
     -------
@@ -180,6 +210,7 @@ def vertices_to_parcels(
             cifti_structure=cifti_structure_lh,
             background=background,
             parc_ignore=parc_ignore,
+            agg_method=agg_method
         )
         reduced_rh, keys_rh, labels_rh = _vertices_to_parcels_single_hemi(
             vert_data[1],
@@ -187,6 +218,7 @@ def vertices_to_parcels(
             cifti_structure=cifti_structure_rh,
             background=background,
             parc_ignore=parc_ignore,
+            agg_method=agg_method
         )
 
         reduced = (reduced_lh, reduced_rh)
@@ -195,18 +227,19 @@ def vertices_to_parcels(
     else:
         # single hemisphere
         if hemi == "L":
-            cifti_structure_lh = "CIFTI_STRUCTURE_CORTEX_LEFT"
+            cifti_structure = "CIFTI_STRUCTURE_CORTEX_LEFT"
         elif hemi == "R":
-            cifti_structure_lh = "CIFTI_STRUCTURE_CORTEX_RIGHT"
+            cifti_structure = "CIFTI_STRUCTURE_CORTEX_RIGHT"
         else:
             raise ValueError(f"Unknown hemisphere: {hemi}")
 
         reduced, keys, labels = _vertices_to_parcels_single_hemi(
             vert_data,
             parc_file,
-            cifti_structure=cifti_structure_lh,
+            cifti_structure=cifti_structure,
             background=background,
             parc_ignore=parc_ignore,
+            agg_method=agg_method
         )
 
     return reduced, keys, labels
@@ -224,7 +257,7 @@ def _parcels_to_vertices_single_hemi(
         raise RuntimeWarning(f"Keys are not ordered: {keys}, {labels}")
 
     projected = np.full(
-        (vertices.shape[0],) + parc_data.shape[1:], fill, dtype=parc_data.dtype
+        (vertices.shape[0],) + parc_data.shape[1:], fill, dtype=np.float64
     )
     for i_idx, idx in enumerate(keys):
         found = vertices == idx
@@ -279,24 +312,39 @@ def parcels_to_vertices(
     * Returns projected data, keys, and labels.
     """
     if hemi == "both":
-        if isinstance(parc_file, (tuple, list)):
-            cifti_structure_lh = cifti_structure_rh = None
-        else:
-            cifti_structure_lh = "CIFTI_STRUCTURE_CORTEX_LEFT"
-            cifti_structure_rh = "CIFTI_STRUCTURE_CORTEX_RIGHT"
+        if isinstance(parc_file, (tuple, list)):  # .annot or .gii file
+            cifti_structure = (None, None)
+        else:  # Then it's a dlabel.nii file
+            cifti_structure = ("CIFTI_STRUCTURE_CORTEX_LEFT",
+                               "CIFTI_STRUCTURE_CORTEX_RIGHT")
             parc_file = (parc_file, parc_file)
+
+        # Prepare parcellated data
+        parc_keys = []
+        for p, cs in zip(parc_file, cifti_structure):
+            _, keys, _ = load_surf_parc_file(p, cifti_structure=cs)
+            parc_keys.append(keys)
+        if len(parc_data) == 2:  # tuple/list of (left_data, right_data)
+            if not all(len(parc_data[i]) == len(parc_keys[i]) for i in range(2)):
+                raise ValueError("Data length mismatch")
+        else:  # single concatenated array
+            if len(parc_data) != len(parc_keys[0]) + len(parc_keys[1]):
+                raise ValueError("Data length mismatch")
+            # Split concatenated array into left and right hemispheres
+            parc_data = (parc_data[:len(parc_keys[0])],
+                         parc_data[len(parc_keys[0]):])
 
         projected_lh, keys_lh, labels_lh = _parcels_to_vertices_single_hemi(
             parc_data[0],
             parc_file[0],
-            cifti_structure=cifti_structure_lh,
+            cifti_structure=cifti_structure[0],
             fill=fill,
             parc_ignore=parc_ignore,
         )
         projected_rh, keys_rh, labels_rh = _parcels_to_vertices_single_hemi(
             parc_data[1],
             parc_file[1],
-            cifti_structure=cifti_structure_rh,
+            cifti_structure=cifti_structure[1],
             fill=fill,
             parc_ignore=parc_ignore,
         )
@@ -306,16 +354,16 @@ def parcels_to_vertices(
         labels = (labels_lh, labels_rh)
     else:
         if hemi == "L":
-            cifti_structure_lh = "CIFTI_STRUCTURE_CORTEX_LEFT"
+            cifti_structure = "CIFTI_STRUCTURE_CORTEX_LEFT"
         elif hemi == "R":
-            cifti_structure_lh = "CIFTI_STRUCTURE_CORTEX_RIGHT"
+            cifti_structure = "CIFTI_STRUCTURE_CORTEX_RIGHT"
         else:
             raise ValueError(f"Unknown hemisphere: {hemi}")
 
         projected, keys, labels = _parcels_to_vertices_single_hemi(
             parc_data,
             parc_file,
-            cifti_structure=cifti_structure_lh,
+            cifti_structure=cifti_structure,
             fill=fill,
             parc_ignore=parc_ignore,
         )

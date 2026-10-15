@@ -62,6 +62,7 @@ To download project-related data
    fetch_shafiei_megfmrimapping
    fetch_shafiei_megdynamics
    fetch_suarez_mami
+   fetch_bazinet_assortativity
    fetch_famous_gmat
    fetch_neurosynth
 
@@ -126,6 +127,9 @@ Pyvista
    :toctree: generated/
 
    pv_plot_surface
+   pv_plot_parcellated_data
+   pv_plot_subcortex
+   _pv_make_subcortex_surfaces
 
 PySurfer (deprecated)
 
@@ -302,9 +306,17 @@ To calculate spatial statistics
    local_morans_i
    gearys_c
    local_gearys_c
-   lees_i
-   local_lees_i
+   lees_l
+   local_lees_l
 
+To generate autocorrelated brain maps
+
+.. autosummary::
+   :template: function.rst
+   :toctree: generated/
+
+   generate_ac_maps
+   permute_ac_map
 
 .. _ref_interface:
 

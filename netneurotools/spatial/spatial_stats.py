@@ -11,7 +11,7 @@ def _morans_i_vectorized(annot, weight):
     n = annot.shape[0]
     annot_demean = annot - np.mean(annot)
     W = np.sum(weight)
-    upper = np.sum(weight * np.outer(annot_demean, annot_demean))
+    upper = np.sum(annot_demean * np.squeeze(weight @ annot_demean[:, None]))
     lower = np.sum(annot_demean**2)
     return n * upper / (lower * W)
 
@@ -32,7 +32,32 @@ if has_numba:
     _morans_i_numba = njit(_morans_i_numba)
 
 
-def morans_i(annot, weight, use_numba=has_numba):
+def _I_ev(w):
+    n = len(w)
+    return -1 / (n - 1)
+
+
+def _I_var(w):
+    n = len(w)
+    s0 = w.sum(axis=None)
+    num = (n * n * _S1(w)) - (n * _S2(w)) + (3 * s0 * s0)
+    den = (s0 * s0) * ((n * n) - 1)
+    var = num / den - (_I_ev(w)**2)
+    return var
+
+
+def _S1(w):
+    A = w + w.T
+    return (A * A).sum(axis=None) / 2
+
+
+def _S2(w):
+    row_sum = w.sum(axis=1)
+    col_sum = w.sum(axis=0)
+    return np.sum((row_sum + col_sum)**2)
+
+
+def morans_i(annot, weight, use_numba=has_numba, standardized=False):
     r"""
     Calculate Moran's I for spatial autocorrelation.
 
@@ -46,15 +71,23 @@ def morans_i(annot, weight, use_numba=has_numba):
     use_numba : bool, optional
         Whether to use numba for calculation. Default: True (if numba is
         installed).
+    standardized: bool, optional
+        Whether to standardize the Moran's I statistic with respect to its
+        expectation and variance under the null assumption that annotation
+        values are sampled from a normal distribution.
 
     Returns
     -------
     morans_i : float
         Moran's I value for the given annotations and weight matrix.
 
+    See Also
+    --------
+    netneurotools.spatial.spatial_stats.local_morans_i
+
     Notes
     -----
-    Moran's I is calculated as:
+    Moran's I [1,2] is calculated as:
 
     .. math::
         I = \frac{n}{\sum_{i=1}^{n} \sum_{j=1}^{n} w_{ij}} \frac{\sum_{i=1}^{n}
@@ -77,16 +110,59 @@ def morans_i(annot, weight, use_numba=has_numba):
         # or
         moran.test(x, w)
 
-    See Also
-    --------
-    netneurotools.spatial.spatial_stats.local_morans_i
+    Standardized Moran's I [2] is calculated as:
+
+    .. math::
+
+        Z_I = \frac{I - \mathbb{E}[I]}{\sqrt{\mathrm{Var}(I)}}
+
+    where
+
+    .. math::
+
+        \mathbb{E}[I] = -\frac{1}{n-1}
+
+    and
+
+    .. math::
+
+        \mathrm{Var}(I) = \frac{n^2 S_1 - n S_2 + 3 S_0^2} {(n-1)(n-2)(n-3) S_0^2} -
+        \left( \frac{1}{n-1} \right)^2,
+
+    with
+
+    .. math::
+
+        S_0 = \sum_i\sum_j w_{ij},
+
+    .. math::
+
+        S_1 = \frac{1}{2} \sum_{ij} (w_{ij} + w_{ji})^2,
+
+    and
+
+    .. math::
+
+        S_2 = \sum_i \left( \sum_j w_{ij} + \sum_j w_{ji} \right)^2.
+
+    References
+    ----------
+    .. [1] Moran, P. A. (1950). Notes on continuous stochastic phenomena.
+        Biometrika, 37(1/2), 17-23.
+    .. [2] Cliff, A. & Ord, J. Spatial Processes: Models & Applications
+        (Pion, 1981).
     """
     if use_numba:
         if not has_numba:
             raise ValueError("Numba not installed; cannot use numba for calculation")
-        return _morans_i_numba(annot, weight)
+        morans_i = _morans_i_numba(annot, weight)
     else:
-        return _morans_i_vectorized(annot, weight)
+        morans_i = _morans_i_vectorized(annot, weight)
+
+    if standardized:
+        morans_i = (morans_i - _I_ev(weight)) / np.sqrt(_I_var(weight))
+
+    return morans_i
 
 
 def local_morans_i(annot, weight, use_sampvar=True):
@@ -108,6 +184,10 @@ def local_morans_i(annot, weight, use_sampvar=True):
     local_morans_i : array, shape (n,)
         Local Moran's I values for the given annotations and weight matrix.
 
+    See Also
+    --------
+    netneurotools.spatial.spatial_stats.morans_i
+
     Notes
     -----
     Local Moran's I is calculated as:
@@ -128,10 +208,6 @@ def local_morans_i(annot, weight, use_sampvar=True):
             x <- rnorm(100)
             m <- matrix(runif(100*100), nrow=100)
             localmoran(x, mat2listw(m), mlvar=TRUE)
-
-    See Also
-    --------
-    netneurotools.spatial.spatial_stats.morans_i
     """
     n = annot.shape[0]
     annot_demean = annot - np.mean(annot)
@@ -274,7 +350,7 @@ def local_gearys_c(annot, weight, use_sampvar=True):
     return right / m_2
 
 
-def _lees_i_vectorized(annot_1, annot_2, weight):
+def _lees_l_vectorized(annot_1, annot_2, weight):
     n = annot_1.shape[0]
     annot_1_demean = annot_1 - np.mean(annot_1)
     annot_2_demean = annot_2 - np.mean(annot_2)
@@ -294,7 +370,7 @@ def _lees_i_vectorized(annot_1, annot_2, weight):
     return n / s2 * upper / np.sqrt(lower_1) / np.sqrt(lower_2)
 
 
-def _lees_i_numba(annot_1, annot_2, weight):
+def _lees_l_numba(annot_1, annot_2, weight):
     n = annot_1.shape[0]
     annot_1_demean = annot_1 - np.mean(annot_1)
     annot_2_demean = annot_2 - np.mean(annot_2)
@@ -316,16 +392,16 @@ def _lees_i_numba(annot_1, annot_2, weight):
     return n / s2 * upper / np.sqrt(lower_1) / np.sqrt(lower_2)
 
 
-def lees_i(annot_1, annot_2, weight, use_numba=has_numba):
+def lees_l(annot_1, annot_2, weight, use_numba=has_numba):
     r"""
-    Calculate Lee's I for spatial autocorrelation.
+    Calculate Lee's L for spatial autocorrelation.
 
     Parameters
     ----------
     annot_1 : array-like, shape (n,)
-        Array of annotations to calculate Lee's I for.
+        Array of annotations to calculate Lee's L for.
     annot_2 : array-like, shape (n,)
-        Array of annotations to calculate Lee's I for.
+        Array of annotations to calculate Lee's L for.
     weight : array-like, shape (n, n)
         Spatial weight matrix. Note that we do not explicitly check for symmetry
         in the weight matrix, nor zero-diagonal elements.
@@ -335,12 +411,12 @@ def lees_i(annot_1, annot_2, weight, use_numba=has_numba):
 
     Returns
     -------
-    lees_i : float
-        Lee's I value for the given annotations and weight matrix.
+    lees_l : float
+        Lee's L value for the given annotations and weight matrix.
 
     Notes
     -----
-    Lee's I is calculated as:
+    Lee's L is calculated as:
 
     .. math::
         L(x,y) = \frac{n}{\sum_{i=1}^n(\sum_{j=1}^n w_{ij})^2}
@@ -367,33 +443,33 @@ def lees_i(annot_1, annot_2, weight, use_numba=has_numba):
     if use_numba:
         if not has_numba:
             raise ValueError("Numba not installed; cannot use numba for calculation")
-        return _lees_i_numba(annot_1, annot_2, weight)
+        return _lees_l_numba(annot_1, annot_2, weight)
     else:
-        return _lees_i_vectorized(annot_1, annot_2, weight)
+        return _lees_l_vectorized(annot_1, annot_2, weight)
 
 
-def local_lees_i(annot_1, annot_2, weight):
+def local_lees_l(annot_1, annot_2, weight):
     r"""
-    Calculate local Lee's I for spatial autocorrelation.
+    Calculate local Lee's L for spatial autocorrelation.
 
     Parameters
     ----------
     annot_1 : array-like, shape (n,)
-        Array of annotations to calculate Lee's I for.
+        Array of annotations to calculate Lee's L for.
     annot_2 : array-like, shape (n,)
-        Array of annotations to calculate Lee's I for.
+        Array of annotations to calculate Lee's L for.
     weight : array-like, shape (n, n)
         Spatial weight matrix. Note that we do not explicitly check for symmetry
         in the weight matrix, nor zero-diagonal elements.
 
     Returns
     -------
-    local_lees_i : array, shape (n,)
-        Local Lee's I values for the given annotations and weight matrix.
+    local_lees_l : array, shape (n,)
+        Local Lee's L values for the given annotations and weight matrix.
 
     Notes
     -----
-    Local Lee's I is calculated as:
+    Local Lee's L is calculated as:
 
     .. math::
         L_i(x,y) = \frac{(\sum_{j=1}^n w_{ij}(x_i - \bar{x}))

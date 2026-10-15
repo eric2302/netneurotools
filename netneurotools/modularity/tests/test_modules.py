@@ -1,6 +1,5 @@
 """For testing netneurotools.modularity.modules functionality."""
 
-import bct
 import pytest
 import numpy as np
 from sklearn.cluster import k_means, spectral_clustering
@@ -56,8 +55,8 @@ def test_match_assignments():
 
     # check that we didn't _actually_ change cluster assignments with matching;
     # the agreement matrices should match!
-    assert np.allclose(bct.clustering.agreement(assignments),
-                       bct.clustering.agreement(matched))
+    assert np.allclose(modularity.agreement_matrix(assignments),
+                       modularity.agreement_matrix(matched))
 
 
 def test_reorder_assignments():
@@ -95,18 +94,16 @@ def test_find_consensus(assignments, clusters):
     assert np.all(modularity.find_consensus(assignments) == clusters)
 
 
-def test_dummyvar():
-    """Test generation of dummy variables."""
-    # generate small example dummy variable code
-    out = modularity._dummyvar(np.array([1, 1, 2, 3, 3]))
-    assert np.all(out == np.array([[1, 0, 0],
-                                   [1, 0, 0],
-                                   [0, 1, 0],
-                                   [0, 0, 1],
-                                   [0, 0, 1]]))
-
-    allones = np.array([1, 1, 1, 1, 1, 1, 1, 1])
-    assert np.all(modularity._dummyvar(allones) == allones)
+def test_agreement_matrix():
+    """Test calculation of agreement matrix."""
+    assignments = np.array([[0, 0],
+                            [0, 1],
+                            [1, 1]])
+    expected = np.array([[0, 1, 0],
+                         [1, 0, 1],
+                         [0, 1, 0]])
+    agreement = modularity.agreement_matrix(assignments)
+    assert np.all(agreement == expected)
 
 
 def test_zrand():
@@ -114,11 +111,19 @@ def test_zrand():
     # make the same two-group community assignments (with different labels)
     label = np.ones((100, 1))
     X, Y = np.vstack((label, label * 2)), np.vstack((label * 2, label))
+    expected = 140.356688476182
     # compare
+    assert np.isclose(modularity.zrand(X, Y), expected)
+    assert modularity.zrand(X, X) == modularity.zrand(X, Y)
     assert modularity.zrand(X, Y) == modularity.zrand(X, Y[::-1])
-    random = rs.choice([0, 1], size=X.shape)
-    assert modularity.zrand(X, Y) > modularity.zrand(X, random)
     assert modularity.zrand(X, Y) == modularity.zrand(X[:, 0], Y[:, 0])
+
+    # make two community assignments with different numbers of communities
+    X = np.array([0, 0, 0, 1, 1, 1, 2, 1, 1, 2, 0])
+    Y = np.array([2, 0, 3, 3, 1, 0, 2, 1, 3, 1, 2])
+    expected = -0.06593804733957866
+    # compare
+    assert np.isclose(modularity.zrand(X, Y), expected)
 
 
 def test_zrand_partitions():

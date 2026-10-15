@@ -27,7 +27,8 @@ dependencies = [
   "scikit-learn",
   "nibabel >=3.0.0",
   "nilearn",
-  "tqdm"
+  "tqdm",
+  "neuromaps"
 ]
 
 dynamic=["version"]
@@ -98,7 +99,7 @@ exclude = [
   "versioneer.py",
   "netneurotools/_version.py",
   "docs/conf.py",
-  "examples/*",
+  # "examples/*",
 ]
 target-version = "py38"
 
@@ -123,6 +124,7 @@ convention = "numpy"
 addopts = "--strict-markers --pyargs"
 markers = [
   "fetcher: mark test to fetch data from the internet",
+  "numba: mark test that requires numba",
   "pyvista: mark test that requires pyvista",
   "pysurfer: mark test that requires pysurfer"
 ]

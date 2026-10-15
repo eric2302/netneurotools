@@ -7,10 +7,6 @@ from scipy import optimize
 from scipy.cluster import hierarchy
 from joblib import Parallel, delayed
 
-from .. import has_numba
-if has_numba:
-    from numba import njit
-
 
 def _get_relabels(c1, c2):
     """
@@ -313,6 +309,99 @@ def reorder_assignments(assignments, consensus=None, col_sort=True,
     return assignments
 
 
+def agreement_matrix(assignments):
+    """
+    Compute the agreement matrix from cluster solutions in `assignments`.
+
+    Parameters
+    ----------
+    assignments : (N, M) array_like
+        Array of `M` clustering solutions for `N` samples (e.g., subjects,
+        nodes, etc). Values of array should be integer-based cluster assignment
+        labels
+
+    Returns
+    -------
+    agreement: (N, N) array_like
+        Agreement matrix where each entry indicates the number of times a pair
+        of samples was assigned to the same cluster.
+    """
+    assignments = np.asarray(assignments)
+    N, M = assignments.shape
+    agreement = np.zeros((N, N), dtype=np.int32)
+
+    for k in range(M):
+        labels = assignments[:, k]
+        for lbl in np.unique(labels):
+            nodes = np.where(labels == lbl)[0]
+            agreement[np.ix_(nodes, nodes)] += 1
+
+    np.fill_diagonal(agreement, 0)
+    return agreement
+
+
+def consensus_clustering(agreement, threshold, n_it=10):
+    """
+    Perform consensus clustering on an agreement matrix.
+
+    This algorithm, first introduced in [1]_, iteratively thresholds the
+    agreement matrix and applies community detection to identify stable
+    clustering partitions. The procedure terminates when a single unique
+    partition is obtained or when no supra-threshold agreement remains.
+
+    Parameters
+    ----------
+    agreement : (N, N) array_like
+        Agreement matrix indicating the frequency with which pairs of
+        samples were assigned to the same cluster
+    threshold : float
+        Threshold value used to remove weak agreement entries
+    n_it : int, optional
+        Number of community detection iterations per consensus step.
+        Default: 10
+
+    Returns
+    -------
+    consensus : (N,) numpy.ndarray
+        Consensus cluster labels
+
+    Notes
+    -----
+    This algorithm is adapted from `consensus_und` of the Brain Connectivity
+    Toolbox [2]_.
+
+    References
+    ----------
+    .. [1] Lancichinetti, A., & Fortunato, S. (2012). Consensus clustering in
+       complex networks. Scientific reports, 2(1), 336.
+
+    .. [2] Rubinov, M., & Sporns, O. (2010). Complex network measures of brain
+       connectivity: uses and interpretations. Neuroimage, 52(3), 1059-1069.
+
+    """
+    n = len(agreement)
+    while True:
+
+        thresholded_agreement = np.where(agreement >= threshold, agreement, 0)
+        np.fill_diagonal(thresholded_agreement, 0)
+
+        if np.all(thresholded_agreement == 0):
+            ci_unique = np.arange(n)
+            break
+        else:
+            ci = np.zeros((n, n_it))
+            for i in range(n_it):
+                ci[:, i], _ = bct.community_louvain(thresholded_agreement,
+                                                    B='modularity')
+            ci_unique = _unique_partitions(ci)
+            if ci_unique.shape[1] > 1:
+                agreement = agreement_matrix(ci) / n_it
+            else:
+                break
+
+    return np.squeeze(ci_unique + 1)
+
+
 def find_consensus(assignments, null_func=np.mean, return_agreement=False,
                    seed=None):
     """
@@ -352,15 +441,15 @@ def find_consensus(assignments, null_func=np.mean, return_agreement=False,
 
     # create agreement matrix from input community assignments and convert to
     # probability matrix by dividing by `comm`
-    agreement = bct.clustering.agreement(assignments, buffsz=samp) / comm
+    agreement = agreement_matrix(assignments) / comm
 
     # generate null agreement matrix and use to create threshold
     null_assign = np.column_stack([rs.permutation(i) for i in assignments.T])
-    null_agree = bct.clustering.agreement(null_assign, buffsz=samp) / comm
+    null_agree = agreement_matrix(null_assign) / comm
     threshold = null_func(null_agree)
 
     # run consensus clustering on agreement matrix after thresholding
-    consensus = bct.clustering.consensus_und(agreement, threshold, 10)
+    consensus = consensus_clustering(agreement, threshold, n_it=10)
 
     if return_agreement:
         return consensus.astype(int), agreement * (agreement > threshold)
@@ -431,32 +520,11 @@ def consensus_modularity(adjacency, gamma=1, B='modularity',
     return consensus, np.array(Q_all), zrand_all
 
 
-def _dummyvar(labels):
-    """
-    Generate dummy-coded array from provided community assignment `labels`.
-
-    Parameters
-    ----------
-    labels : (N,) array_like
-        Labels assigning `N` samples to `G` groups
-
-    Returns
-    -------
-    ci : (N, G) numpy.ndarray
-        Dummy-coded array where 1 indicates that a sample belongs to a group
-    """
-    comms = np.unique(labels)
-
-    ci = np.zeros((len(labels), len(comms)))
-    for n, grp in enumerate(comms):
-        ci[:, n] = labels == grp
-
-    return ci
-
-
 def zrand(X, Y):
     """
     Calculate the z-Rand index of two community assignments.
+
+    Communities are relabeled to consecutive integers for the comparison.
 
     Parameters
     ----------
@@ -474,28 +542,42 @@ def zrand(X, Y):
     (2011). Comparing Community Structure to Characteristics in Online
     Collegiate Social Networks. SIAM Review, 53, 526-543.
     """
+    X = np.squeeze(X)
+    Y = np.squeeze(Y)
+
     if X.ndim > 1 or Y.ndim > 1:
-        if X.shape[-1] > 1 or Y.shape[-1] > 1:
-            raise ValueError('X and Y must have only one-dimension each. '
-                             'Please check inputs.')
+        raise ValueError('X and Y must have only one-dimension each. '
+                         'Please check inputs.')
 
-    Xf = X.flatten()
-    Yf = Y.flatten()
+    if len(X) != len(Y):
+        raise ValueError('X and Y must have the same length.')
 
-    n = len(Xf)
-    indx, indy = _dummyvar(Xf), _dummyvar(Yf)
-    Xa = indx.dot(indx.T)
-    Ya = indy.dot(indy.T)
+    X = np.unique(X, return_inverse=True)[1]
+    Y = np.unique(Y, return_inverse=True)[1]
 
-    M = n * (n - 1) / 2
-    M1 = Xa.nonzero()[0].size / 2
-    M2 = Ya.nonzero()[0].size / 2
+    # Check for undefined single-community case
+    if X.max() == 0 or Y.max() == 0:
+        raise ValueError('X and Y must contain at least 2 distinct communities '
+                         'each. z-Rand is undefined for single-community '
+                         'inputs (standard deviation=0).')
 
-    wab = np.logical_and(Xa, Ya).nonzero()[0].size / 2
+    # Calculate the contigency table + calculate row/column marginals
+    kx = X.max() + 1
+    ky = Y.max() + 1
+    nij = np.bincount(X * ky + Y, minlength=kx * ky).reshape(kx, ky)
+    ni = nij.sum(axis=1)
+    nj = nij.sum(axis=0)
+
+    n = len(X)
+    M = n * (n - 1) // 2
+    M1 = np.sum(ni * (ni - 1)) / 2
+    M2 = np.sum(nj * (nj - 1)) / 2
+    wab = np.sum(nij * (nij - 1)) / 2
 
     mod = n * (n**2 - 3 * n - 2)
-    C1 = mod - (8 * (n + 1) * M1) + (4 * np.power(indx.sum(0), 3).sum())
-    C2 = mod - (8 * (n + 1) * M2) + (4 * np.power(indy.sum(0), 3).sum())
+
+    C1 = mod - 8 * (n + 1) * M1 + 4 * np.sum(ni**3)
+    C2 = mod - 8 * (n + 1) * M2 + 4 * np.sum(nj**3)
 
     a = M / 16
     b = ((4 * M1 - 2 * M)**2) * ((4 * M2 - 2 * M)**2) / (256 * (M**2))
@@ -541,10 +623,39 @@ def _zrand_partitions(communities):
     return all_zrand
 
 
-if has_numba:
-    _dummyvar = njit(_dummyvar)
-    zrand = njit(zrand)
-    _zrand_partitions = njit(_zrand_partitions, parallel=True)
+def _unique_partitions(communities):
+    """
+    Identify unique clustering partitions from a set of solutions.
+
+    Relabels each partition in `communities` to use consecutive integer labels
+    starting from zero, then removes duplicate partitions across columns.
+
+    Parameters
+    ----------
+    communities : (N, M) array_like
+        Array of `M` clustering solutions for `N` samples
+
+    Returns
+    -------
+    unique : (N, K) numpy.ndarray
+        Array containing the `K` unique clustering partitions identified
+        from `communities`
+    """
+    # Relabel partitions to consecutive integers
+    n, m = communities.shape
+    for i in range(m):
+        communities[:, i] = np.unique(communities[:, i], return_inverse=True)[1]
+
+    # Remove duplicate partitions
+    seen = set()
+    unique_cols = []
+    for i in range(m):
+        key = tuple(communities[:, i])
+        if key not in seen:
+            seen.add(key)
+            unique_cols.append(communities[:, i])
+
+    return np.column_stack(unique_cols)
 
 
 def get_modularity(adjacency, comm, gamma=1):
@@ -625,7 +736,7 @@ def get_modularity_z(adjacency, comm, gamma=1, n_perm=10000, seed=None):
 
     # avoid instances where dist.std(1) == 0
     std = simu_qs.std(axis=1)
-    if std == 0:
+    if np.any(std == 0):
         return np.mean(real_qs - simu_qs.mean(axis=1))
     else:
         return np.mean((real_qs - simu_qs.mean(axis=1)) / std)

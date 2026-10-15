@@ -80,6 +80,10 @@ def distance_wei_floyd(D):
     p_mat : (N, N) array_like
         Predecessor matrix returned from `scipy.sparse.csgraph.shortest_path`
 
+    See Also
+    --------
+    netneurotools.metrics.retrieve_shortest_path
+
     Notes
     -----
     This function is a wrapper for `scipy.sparse.csgraph.shortest_path`.
@@ -95,10 +99,6 @@ def distance_wei_floyd(D):
     .. [3] Warshall, S. (1962). A theorem on boolean matrices. Journal of the
        ACM (JACM), 9(1), 11-12.
     .. [4] https://en.wikipedia.org/wiki/Floyd%E2%80%93Warshall_algorithm
-
-    See Also
-    --------
-    netneurotools.metrics.retrieve_shortest_path
     """
     spl_mat, p_mat = shortest_path(
         D,
@@ -172,11 +172,9 @@ def navigation_wu(nav_dist_mat, sc_mat):
         List of tuples containing source node, target node, path length,
         path hops, and the full path.
 
-    References
-    ----------
-    Seguin, C., Van Den Heuvel, M. P., & Zalesky, A. (2018). Navigation
-    of brain networks. Proceedings of the National Academy of Sciences,
-    115(24), 6297-6302.
+    See Also
+    --------
+    netneurotools.metrics.get_navigation_path_length
 
     Notes
     -----
@@ -186,9 +184,11 @@ def navigation_wu(nav_dist_mat, sc_mat):
     Use :meth:`netneurotools.metrics.get_navigation_path_length`
     to get path length in other metrics.
 
-    See Also
-    --------
-    netneurotools.metrics.get_navigation_path_length
+    References
+    ----------
+    Seguin, C., Van Den Heuvel, M. P., & Zalesky, A. (2018). Navigation
+    of brain networks. Proceedings of the National Academy of Sciences,
+    115(24), 6297-6302.
     """
     nav_paths = []  # (source, target, distance, hops, path)
     # navigate to the node that is closest to target
@@ -260,6 +260,10 @@ def get_navigation_path_length(nav_paths, alt_dist_mat):
     nav_path_len : (N, N) array_like
         Navigation path length matrix, in the alternative distance metric.
 
+    See Also
+    --------
+    netneurotools.metrics.navigation_wu
+
     Notes
     -----
     Following the original BCT function.
@@ -267,10 +271,6 @@ def get_navigation_path_length(nav_paths, alt_dist_mat):
     L is strength-to-length remapping of the connection weight matrix.
     `pl_dis = get_navigation_path_length(nav_paths, D)`
     D is Euclidean distance between node centroids.
-
-    See Also
-    --------
-    netneurotools.metrics.navigation_wu
     """
     nav_path_len = np.zeros_like(alt_dist_mat)
     for nav_item in nav_paths:
@@ -538,7 +538,7 @@ def search_information(W, D, has_memory=False):
     return SI
 
 
-def mean_first_passage_time(W, tol=1e-3):
+def mean_first_passage_time(W, check_connected=True):
     """
     Calculate mean first passage time.
 
@@ -556,8 +556,8 @@ def mean_first_passage_time(W, tol=1e-3):
     ----------
     W : (N x N) ndarray
         Weighted/unweighted, direct/undirected connection weight/length array
-    tol : float, optional
-        Tolerance for eigenvalue of 1. Default: 1e-3
+    check_connected : bool
+        If `True`, then checks whether `W` is strongly connected.
 
     Returns
     -------
@@ -571,21 +571,20 @@ def mean_first_passage_time(W, tol=1e-3):
        morphospace of communication efficiency in complex networks. PLoS One,
        8(3), e58070.
     """
+    # Ensure that the Markov chain is irreducible
+    if check_connected:
+        n_components, _ = scipy.sparse.csgraph.connected_components(
+            scipy.sparse.csr_matrix(W), directed=True, connection='strong')
+        if n_components != 1:
+            raise ValueError(f"Transition matrix is reducible ({n_components} "
+                             "strongly connected components); stationary distribution "
+                             "is not unique.")
+
     P = W / np.sum(W, axis=1)[:, None]  # transition matrix
     n = len(P)
-    D, V = np.linalg.eig(P.T)
-    D_minidx = np.argmin(np.abs(D - 1))
-
-    if D[D_minidx] > 1 + tol:
-        raise ValueError(
-            f"Cannot find eigenvalue of 1. Minimum eigenvalue is larger than {tol}."
-        )
-
-    w = V[:, D_minidx][None, :]
-    w /= np.sum(w)
-    W_prob = np.real(np.repeat(w, n, 0))
-    Z = np.linalg.inv(np.eye(n) - P + W_prob)  # fundamental matrix
-    mfpt = (np.repeat(np.diag(Z)[None, :], n, 0) - Z) / W_prob
+    stationary = np.linalg.solve(P.T - np.eye(n) + 1.0, np.ones(n))
+    Z = np.linalg.inv(np.eye(n) - P + stationary[None, :])  # fundamental matrix
+    mfpt = (np.diag(Z)[None, :] - Z) / stationary[None, :]
     return mfpt
 
 
@@ -773,8 +772,8 @@ def _assortativity_und_vectorized(x_vec, weight_mat):
     weight_sum = np.sum(weight_vec)
     x_norm_mean = np.dot(x_vec, weight_vec) / weight_sum
     x_inner = x_vec - x_norm_mean
-    upper = np.sum(weight_mat * np.outer(x_inner, x_inner))
-    lower = np.sum(weight_vec * x_inner**2)
+    upper = np.sum(x_inner * np.squeeze(weight_mat @ x_inner[:, None]))
+    lower = np.dot(weight_vec, x_inner**2)
     return upper / lower
 
 
@@ -795,10 +794,10 @@ def _assortativity_und_numba(x_vec, weight_mat):
 
 
 if has_numba:
-    _assortativity_und_numba = _assortativity_und_numba
+    _assortativity_und_numba = njit(_assortativity_und_numba)
 
 
-def assortativity_und(x, W, use_numba=True):
+def assortativity_und(x, W, use_numba=False):
     r"""
     Calculate assortativity for undirected networks.
 
@@ -808,11 +807,13 @@ def assortativity_und(x, W, use_numba=True):
     Parameters
     ----------
     x : (N,) array_like
-        Annotation scores for each node in the network
+        Annotation values for each node in the network
     W : (N, N) array_like
         Weighted, undirected connection weight array
     use_numba : bool, optional
-        Whether to use numba for calculation. Default: True
+        Whether to use numba for calculation. Note that numba is not
+        necessarily faster than the vectorized (non-numba) version.
+        Default: False
         (if numba is available).
 
     Returns
@@ -820,22 +821,24 @@ def assortativity_und(x, W, use_numba=True):
     assortativity : float
         Assortativity of the network
 
+    See Also
+    --------
+    netneurotools.metrics.assortativity_dir
+
     Notes
     -----
     Assortativity is defined as the Pearson correlation between the local
-    annotation scores of connected nodes [2]_. In other words, it quantifies the
-    tendency for nodes with similar annotation scores to be connected [1]_.
+    annotation values of connected nodes [2]_. In other words, it quantifies the
+    tendency for nodes with similar annotation values to be connected [1]_.
     For an adjacency matrix :math:`A`, and an annotation vector :math:`\mathbf{x}`,
     the assortativity of a network, with respect to :math:`\bar{\mathbf{x}}`
     is defined as:
 
     .. math::
-        \begin{align}
         r & = \sum_{ij} \frac{a_{ij}}{2m} \tilde{x}_i \tilde{x}_j \\
           & = \sum_{ij} \frac{a_{ij}}{2m}
           (\frac{x_i-\bar{\mathbf{x}}}{\sigma_{\mathbf{x}}})
           (\frac{x_j-\bar{\mathbf{x}}}{\sigma_{\mathbf{x}}})
-        \end{align}
 
     where :math:`a_{ij}` is the weight of the connection between nodes :math:`i`
     and :math:`j`, :math:`2m` is the total weight of the network.
@@ -843,11 +846,9 @@ def assortativity_und(x, W, use_numba=True):
     standard deviation of the annotation, defined as:
 
     .. math::
-        \begin{align}
         \bar{\mathbf{x}} & = \frac{1}{2m} \sum_i k_i x_i \\
         \sigma_{\mathbf{x}} & = \sqrt{\frac{1}{2m}
         \sum_i k_i (x_i - \bar{\mathbf{x}})^2}
-        \end{align}
 
     in which :math:`k_i` is the sum of the weights of the connections to node :math:`i`.
 
@@ -859,10 +860,6 @@ def assortativity_und(x, W, use_numba=True):
         Communications, 14(1), 2850.
     .. [2] Newman, M. E. (2003). Mixing patterns in networks. Physical review E,
         67(2), 026126.
-
-    See Also
-    --------
-    netneurotools.metrics.assortativity_dir
     """
     if use_numba:
         if not has_numba:
@@ -879,9 +876,9 @@ def _assortativity_dir_vectorized(x_vec, weight_mat):
     x_norm_mean_out = np.dot(x_vec, weight_vec_out) / weight_sum
     x_inner_in = x_vec - x_norm_mean_in
     x_inner_out = x_vec - x_norm_mean_out
-    upper = np.sum(weight_mat * np.outer(x_inner_out, x_inner_in))
-    lower_1 = np.sum(weight_vec_in * x_inner_in**2)
-    lower_2 = np.sum(weight_vec_out * x_inner_out**2)
+    upper = np.sum(x_inner_out * np.squeeze(weight_mat @ x_inner_in[:, None]))
+    lower_1 = np.dot(weight_vec_in, x_inner_in**2)
+    lower_2 = np.dot(weight_vec_out, x_inner_out**2)
     return upper / np.sqrt(lower_1 * lower_2)
 
 
@@ -890,8 +887,8 @@ def _assortativity_dir_numba(x_vec, weight_mat):
     weight_vec_in = np.sum(weight_mat, axis=0)
     weight_vec_out = np.sum(weight_mat, axis=1)
     weight_sum = np.sum(weight_vec_in)
-    x_norm_mean_in = np.sum(np.dot(x_vec, weight_vec_in)) / weight_sum
-    x_norm_mean_out = np.sum(np.dot(x_vec, weight_vec_out)) / weight_sum
+    x_norm_mean_in = np.dot(x_vec, weight_vec_in) / weight_sum
+    x_norm_mean_out = np.dot(x_vec, weight_vec_out) / weight_sum
     upper, lower_1, lower_2 = 0.0, 0.0, 0.0
     for i in range(n):
         for j in range(n):
@@ -910,7 +907,7 @@ if has_numba:
     _assortativity_dir_numba = njit(_assortativity_dir_numba)
 
 
-def assortativity_dir(x, W, use_numba=True):
+def assortativity_dir(x, W, use_numba=False):
     r"""
     Calculate assortativity for directed networks.
 
@@ -920,17 +917,23 @@ def assortativity_dir(x, W, use_numba=True):
     Parameters
     ----------
     x : (N,) array_like
-        Annotation scores for each node in the network
+        Annotation values for each node in the network
     W : (N, N) array_like
         Weighted, directed connection weight array
     use_numba : bool, optional
-        Whether to use numba for calculation. Default: True
+        Whether to use numba for calculation. Note that numba is not
+        necessarily faster than the vectorized (non-numba) version.
+        Default: False
         (if numba is available).
 
     Returns
     -------
     assortativity : float
         Assortativity of the network
+
+    See Also
+    --------
+    netneurotools.metrics.assortativity_und
 
     Notes
     -----
@@ -939,13 +942,11 @@ def assortativity_dir(x, W, use_numba=True):
 
     .. math::
 
-        \begin{align}
         r & = \sum_{ij} \frac{a_{ij}}{m}
         \tilde{x}_i^{\text{out}} \tilde{x}_j^{\text{in}} \\
         & = \sum_{ij} \frac{a_{ij}}{m}
         (\frac{x_i-\bar{\mathbf{x}}^{\text{out}}}{\sigma_{\mathbf{x}}^{\text{out}}})
         (\frac{x_j-\bar{\mathbf{x}}^{\text{in}}}{\sigma_{\mathbf{x}}^{\text{in}}})
-        \end{align}
 
     where :math:`a_{ij}` is the weight of the directed connection from node
     :math:`i` to node :math:`j`, and :math:`m` is the total weight of the
@@ -957,14 +958,12 @@ def assortativity_dir(x, W, use_numba=True):
 
     .. math::
 
-        \begin{align}
         \bar{\mathbf{x}}^{\text{in}} & = \frac{1}{m} \sum_i k_i^{\text{in}} x_i \\
         \bar{\mathbf{x}}^{\text{out}} & = \frac{1}{m} \sum_i k_i^{\text{out}} x_i \\
         \sigma_{\mathbf{x}}^{\text{in}} & = \sqrt{\frac{1}{m}
         \sum_i k_i^{\text{in}} (x_i - \bar{\mathbf{x}}^{\text{in}})^2} \\
         \sigma_{\mathbf{x}}^{\text{out}} & = \sqrt{\frac{1}{m}
         \sum_i k_i^{\text{out}} (x_i - \bar{\mathbf{x}}^{\text{out}})^2}
-        \end{align}
 
     in which :math:`k_i^{\text{in}}` is the sum of incoming weights to node
     :math:`i` and :math:`k_i^{\text{out}}` is the sum of outgoing weights from
@@ -978,10 +977,6 @@ def assortativity_dir(x, W, use_numba=True):
         Communications, 14(1), 2850.
     .. [2] Newman, M. E. (2003). Mixing patterns in networks. Physical review E,
         67(2), 026126.
-
-    See Also
-    --------
-    netneurotools.metrics.assortativity_und
     """
     if use_numba:
         if not has_numba:
